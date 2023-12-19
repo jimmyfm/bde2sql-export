@@ -1,62 +1,67 @@
 program bde2sql;
 
 {$APPTYPE CONSOLE}
-
 {$R *.res}
 
 uses
-  System.SysUtils, Bde.DBTables, System.Classes, Data.DB;
+  System.SysUtils, Bde.DBTables, System.Classes, Data.DB,
+  System.Generics.Collections, Math, StrUtils;
 
 const
-  DB_NAME : String = '';
+  DB_NAME: String = 'xxx';
+
 var
   tblFrom: TTable;
   dbFrom: TDatabase;
-
-  app: TStringList;
-  i, c, d: integer;
-  fd, fieldDef, newFieldDef: TFieldDef;
-  str, prefix: string;
+  tables: TStringList;
+  tableName: String;
   logFile: TextFile;
+
+  arr: Array of String;
+  i, c, d: integer;
+  fieldDef, newFieldDef: TFieldDef;
+  str, prefix: string;
   idx: TIndexDef;
 
 begin
   try
     dbFrom := TDatabase.Create(nil);
-    dbFrom.AliasName := DB_NAME;
+//    dbFrom.AliasName := DB_NAME;
+
     dbFrom.DatabaseName := DB_NAME;
     dbFrom.Name := DB_NAME;
+    dbFrom.Directory := 'C:\xxx\';
 
     tblFrom := TTable.Create(nil);
     tblFrom.DatabaseName := DB_NAME;
 
-    app := TStringList.Create;
-
     dbFrom.Open;
+    tables := TStringList.Create;
+    dbFrom.GetTableNames(tables, false);
 
-    dbFrom.GetTableNames(app, false);
-    for i := 0 to app.Count - 1 do
+    AssignFile(logFile, 'dump.sql');
+    Rewrite(logFile);
+
+    for tableName in tables do
     begin
-      AssignFile(logFile, app[i] + '.sql');
-      Rewrite(logFile);
-      Write(logFile, 'DROP TABLE IF EXISTS dbo.' + app.Strings[i] + ';' + #10);
+      Write(logFile, 'DROP TABLE IF EXISTS ' + tableName + ';' + #10);
 
-      tblFrom.TableName := app[i];
+      tblFrom.tableName := tableName;
       tblFrom.Open;
 
-      Write(logFile, 'CREATE TABLE ' + app[i] + ' (');
+      // Tables
+      Write(logFile, 'CREATE TABLE ' + tableName + ' (' + #10);
       for c := 0 to tblFrom.FieldDefs.Count - 1 do
       begin
-        fd := tblFrom.FieldDefs[c];
-        str := ' ';
-        case fd.DataType of
+        fieldDef := tblFrom.FieldDefs[c];
+        case fieldDef.DataType of
           ftAutoInc:
-            str := 'int IDENTITY (1,1) NOT NULL, CONSTRAINT PK_' + app[i] + '_' + fd.Name + ' PRIMARY KEY CLUSTERED (' +
-              fd.Name + ')';
+            str := 'int NOT NULL, CONSTRAINT PK_' + tableName + '_' + fieldDef.Name + ' PRIMARY KEY (' +
+              fieldDef.Name + ')';
           ftInteger:
             str := 'int';
           ftString:
-            str := 'varchar(' + IntToStr(fd.Size) + ') COLLATE Latin1_General_CI_AS';
+            str := 'varchar(' + IntToStr(fieldDef.Size) + ')';
           ftFloat:
             str := 'float';
           ftDate:
@@ -68,29 +73,27 @@ begin
           ftMemo:
             str := 'text';
           ftDateTime:
-            str := 'datetime';
+            str := 'timestamp';
           ftTime:
             str := 'time';
           ftBlob:
-            str := 'nvarchar(max)';
+            str := 'bytea';
         else
-          Write(logFile, #10 + 'Campo STRANO: ' + FieldTypeNames[fd.DataType]);
+          Write(logFile, #10 + 'Campo STRANO: ' + FieldTypeNames[fieldDef.DataType]);
         end;
-        if fd.Required then
+        if fieldDef.Required then
           str := str + ' NOT NULL';
-        str := ' ' + fd.Name + ' ' + str;
-
         if c < tblFrom.FieldDefs.Count - 1 then
-          str := str + ',';
-
-        Write(logFile, str);
+          str := str + ',' + #10;
+        Write(logFile, #9 + ' ' + fieldDef.Name + ' ' + str);
       end;
       Write(logFile, ');' + #10);
 
+      // Data
       if not tblFrom.IsEmpty then
       begin
-        Write(logFile, 'SET IDENTITY_INSERT dbo.' + app[i] + ' ON;' + #10);
-        prefix := 'INSERT INTO dbo.' + app[i] + ' (';
+        // Write(logFile, 'SET IDENTITY_INSERT dbo.' + tableName + ' ON;' + #10);
+        prefix := 'INSERT INTO ' + tableName + ' (';
         for c := 0 to tblFrom.FieldDefs.Count - 1 do
         begin
           prefix := prefix + tblFrom.FieldDefs[c].Name;
@@ -114,10 +117,13 @@ begin
               str := str + 'null'
             else
               case tblFrom.Fields[c].DataType of
-                ftString, ftBoolean, ftSmallint, ftMemo:
-                  str := str + #39 + StringReplace(tblFrom.Fields[c].AsString, #39, #39#39, [rfReplaceAll]) + #39;
-                ftAutoInc, ftInteger, ftFloat:
+                ftString, ftMemo:
+                  str := str + #39 + StringReplace(StringReplace(tblFrom.Fields[c].AsString, #39, #39#39, [rfReplaceAll]
+                    ), '\', '\\', [rfReplaceAll]) + #39;
+                ftAutoInc, ftInteger, ftSmallint, ftFloat:
                   str := str + ' ' + tblFrom.Fields[c].AsString;
+                ftBoolean:
+                  str := str + ' ' + IfThen(tblFrom.Fields[c].AsBoolean, 'B''1''','B''0''');
                 ftDate:
                   str := str + #39 + FormatDateTime('yyyy-mm-dd', tblFrom.Fields[c].AsDateTime) + #39;
                 ftDateTime:
@@ -141,33 +147,36 @@ begin
           tblFrom.Next;
 
           if (d mod 500 <> 0) and (not tblFrom.Eof) then
-            str := str + '),';
+            str := str + '),' + #10;
         end;
 
         if d mod 500 <> 0 then
           Write(logFile, prefix + str + ');' + #10);
 
         // Write(logFile, ';');
-        Write(logFile, 'SET IDENTITY_INSERT dbo.' + app[i] + ' OFF;' + #10);
+        // Write(logFile, 'SET IDENTITY_INSERT dbo.' + tableName + ' OFF;' + #10);
       end;
 
+      // Indexes
       for c := 0 to tblFrom.IndexDefs.Count - 1 do
       begin
         idx := tblFrom.IndexDefs[c];
         if ixPrimary in idx.Options then
           Continue;
 
+        Write(logFile, 'DROP INDEX IF EXISTS "' + idx.Name + '";' + #10);
+
         str := 'CREATE ';
         if ixUnique in idx.Options then
           str := str + 'UNIQUE ';
 
-        Write(logFile, str + 'INDEX "' + idx.DisplayName + '" ON dbo.' + app[i] + ' (' + StringReplace(idx.Fields, ';',
+        Write(logFile, str + 'INDEX "' + idx.Name + '" ON ' + tableName + ' (' + StringReplace(idx.Fields, ';',
           ',', [rfReplaceAll]) + ');' + #10);
         if ixDescending in idx.Options then
           Write(logFile, '-- ixDescending' + #10);
         // XXX Managed via CI collation
-        // if ixCaseInsensitive in idx.Options then
-        // Write(logFile, '-- ixCaseInsensitive' + #10);
+        if ixCaseInsensitive in idx.Options then
+        Write(logFile, '-- ixCaseInsensitive' + #10);
         if ixExpression in idx.Options then
           Write(logFile, '-- ixExpression' + #10);
         if ixNonMaintained in idx.Options then
@@ -175,11 +184,12 @@ begin
       end;
 
       tblFrom.Close;
-      CloseFile(logFile);
     end;
+    CloseFile(logFile);
 
   except
     on E: Exception do
       Writeln(E.ClassName, ': ', E.Message);
   end;
+
 end.
